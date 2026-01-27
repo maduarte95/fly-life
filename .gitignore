@@ -1,0 +1,9 @@
+data/
+*.pkl
+__pycache__/
+*.py[cod]
+.env
+.venv/
+.vscode/
+.idea/
+.DS_Store
