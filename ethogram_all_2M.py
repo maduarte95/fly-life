@@ -23,7 +23,7 @@ import seaborn as sns
 
 
 # PARAMETERS
-DATA_DIR = Path('data/trajectories/0_trajectories')
+DATA_DIR = Path('data/trajectories/Day1Trajectories')
 OUTPUT_DIR = Path('output_2M')
 OUTPUT_DIR.mkdir(exist_ok=True)
 
@@ -282,6 +282,57 @@ def detect_behaviors_2m(trajectories_paths, areas_path, pixels_per_cm=PIXELS_PER
     }
     session_agg['longest_any_s'] = max(session_agg['longest_copulation_s'], session_agg['longest_pursuit_s'])
 
+    # Per-male aggregation (separate stats for each male)
+    per_male_session_agg = {}
+    for m in male_ids:
+        # totals across females for this male
+        total_cop_frames_m = sum(int(copulation_dfs[m][f].sum()) for f in female_ids)
+        total_pur_frames_m = sum(int(pursuit_dfs[m][f].sum()) for f in female_ids)
+        total_cop_s_m = total_cop_frames_m / frame_rate
+        total_pur_s_m = total_pur_frames_m / frame_rate
+
+        # number of copulation events for this male (sum across females)
+        n_cop_events_m = 0
+        time_firsts = []
+        longest_cop_m = 0
+        longest_pur_m = 0
+        for f in female_ids:
+            cop_bool = copulation_dfs[m][f].values.astype(bool)
+            if cop_bool.sum() > 0:
+                edges = np.diff(np.concatenate([[0], cop_bool.astype(int)]))
+                n_cop_events_m += int((edges == 1).sum())
+                time_firsts.append(float(trajectories['time'].iloc[np.where(cop_bool)[0][0]]))
+                runs = _compute_runs(cop_bool)
+                if runs:
+                    longest_cop_m = max(longest_cop_m, max(r[1] for r in runs) / frame_rate)
+
+            pur_bool = pursuit_dfs[m][f].values.astype(bool)
+            if pur_bool.sum() > 0:
+                runs = _compute_runs(pur_bool)
+                if runs:
+                    longest_pur_m = max(longest_pur_m, max(r[1] for r in runs) / frame_rate)
+
+        # first persistent pursuit by this male (>5min)
+        persistent_frames = int(5 * 60 * frame_rate)
+        persistent_times_m = []
+        for f in female_ids:
+            pur_bool = pursuit_dfs[m][f].values.astype(bool)
+            runs = _compute_runs(pur_bool)
+            pr = next((r for r in runs if r[1] >= persistent_frames), None)
+            if pr is not None:
+                persistent_times_m.append(float(trajectories['time'].iloc[pr[0]]))
+
+        per_male_session_agg[m] = {
+            'total_copulation_s': total_cop_s_m,
+            'total_pursuit_s': total_pur_s_m,
+            'n_copulation_events': n_cop_events_m,
+            'n_females_copulated': sum(1 for f in female_ids if int(copulation_dfs[m][f].sum()) > 0),
+            'longest_copulation_s': longest_cop_m,
+            'longest_pursuit_s': longest_pur_m,
+            'time_first_copulation_s': min(time_firsts) if time_firsts else np.nan,
+            'time_first_persistent_pursuit_s': min(persistent_times_m) if persistent_times_m else np.nan,
+        }
+
     return {
         'trajectories': trajectories,
         'frame_rate': frame_rate,
@@ -291,6 +342,7 @@ def detect_behaviors_2m(trajectories_paths, areas_path, pixels_per_cm=PIXELS_PER
         'copulation_dfs': copulation_dfs,
         'per_female_stats': per_female_stats,
         'session_agg': session_agg,
+        'per_male_session_agg': per_male_session_agg,
         'stats': stats,
     }
 
@@ -305,6 +357,12 @@ def aggregate_sessions_2m(session_results):
         res = sess['result']
         pa = res['session_agg']
         agg.update(pa)
+        # include per-male stats
+        per_male = res.get('per_male_session_agg', {})
+        for m, stats_m in per_male.items():
+            prefix = f'm{m}_'
+            for k, v in stats_m.items():
+                agg[prefix + k] = v
         rows.append(agg)
     return pd.DataFrame(rows)
 
@@ -507,6 +565,23 @@ def main():
     agg_out = OUTPUT_DIR / 'aggregated_session_stats_2M.csv'
     agg_df.to_csv(agg_out, index=False)
     print(f'Saved aggregated stats to {agg_out}')
+
+    # Print numeric summary per session
+    print('\nSESSION SUMMARY (per session)')
+    print(agg_df[['session_key', 'total_copulation_s', 'total_pursuit_s', 'n_copulation_events', 'n_females_copulated', 'longest_any_s']].to_string(index=False))
+
+    # Print per-male summaries
+    for sess in session_results:
+        key = f"{sess['camera']}_{sess['timestamp']}"
+        print(f"\nSession: {key}")
+        per_male = sess['result'].get('per_male_session_agg', {})
+        for m, stats_m in per_male.items():
+            print(f"  Male {m}:")
+            for k, v in stats_m.items():
+                if isinstance(v, float):
+                    print(f"    {k}: {v:.1f}")
+                else:
+                    print(f"    {k}: {v}")
 
     plot_sessions_ethograms_2m(session_results, cols=4)
     plot_summary_dotplots_2m(agg_df, session_results)
