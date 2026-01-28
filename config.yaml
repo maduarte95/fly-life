@@ -1,0 +1,39 @@
+# Configuration file for ethogram analysis
+# Pixel-to-centimeter conversion values for different datasets, cameras, and setups
+
+pixels_per_cm:
+  dataset_1:
+    CamA: 160
+    CamB: 156
+
+  dataset_2:
+    Setup1:
+      CamA: 157
+      CamB: 155
+    Setup2:
+      CamA: 147
+      CamB: 148
+
+# Behavior detection thresholds
+behavior_thresholds:
+  copulation:
+    distance_cm: 0.3  # Distance threshold for copulation (cm)
+    min_duration_sec: 120  # Minimum duration for copulation (seconds)
+    use_id_disappearance: true  # Also detect copulation when male OR female disappears
+    disappearance_min_duration_sec: 120  # Min duration when fly is missing (seconds)
+    gap_merge_threshold_sec: 60  # Merge copulation events if gap < 60 seconds (1 min)
+
+  pursuit:
+    distance_cm: 1.0  # Distance threshold for pursuit (cm)
+    min_duration_sec: 2.0  # Minimum duration for pursuit (seconds)
+
+# Recording parameters
+recording:
+  duration_sec: 7200  # Total recording time (2 hours)
+
+# Plotting parameters
+plotting:
+  time_unit: 'minutes'  # 'seconds' or 'minutes'
+  figure_width: 16
+  figure_height: 8
+  dpi: 300

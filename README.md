@@ -59,3 +59,4 @@ Plots: ethograms where x axis is time, y axis is female fly id???
     - Slides:
         - CamA: 1cm = 208px
         - CamB: 1cm = 203px
+    - My calculation: 127 px/cm
