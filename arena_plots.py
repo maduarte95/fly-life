@@ -1,7 +1,7 @@
 """
-Plot trajectories and heatmaps for the 5F1M session described in the repository.
+Plot trajectories and heatmaps for the 5F1M sessions described in the repository.
 
-Produces:
+Produces for each session:
 - Individual arena trajectory plots (6 panels, one per fly) and a combined plot.
 - Heatmaps (time spent) by 8 angular sectors (45deg each): 6 individual + combined.
 - Heatmaps (time spent) by concentric rings: 6 individual + combined.
@@ -20,15 +20,68 @@ import matplotlib.pyplot as plt
 import seaborn as sns
 import os
 from matplotlib.collections import LineCollection
+from glob import glob
+import re
 
 
-# Edit these paths if needed
-TRAJECTORIES_PATH_1 = 'data/trajectories/0_trajectories/Copy of DGRP375_CamAVideo1_2026-01-12T08_31_36_trajectories.csv'
-TRAJECTORIES_PATH_2 = 'data/trajectories/0_trajectories/Copy of DGRP375_CamAVideo2_2026-01-12T08_31_36_trajectories.csv'
-AREAS_PATH = 'data/trajectories/0_trajectories/Copy of DGRP375_CamAVideo1_2026-01-12T08_31_36_areas.csv'
+TRAJECTORIES_DIR = Path('data/1M/dataset_2')
 
-OUTPUT_DIR = Path('plots_arena')
-OUTPUT_DIR.mkdir(exist_ok=True)
+def discover_sessions():
+    """Discover all sessions by finding unique timestamp+setup combinations."""
+    if not TRAJECTORIES_DIR.exists():
+        raise FileNotFoundError(f"Trajectories directory not found: {TRAJECTORIES_DIR}")
+    
+    # Find all trajectory files
+    traj_files = sorted(TRAJECTORIES_DIR.glob('*_trajectories.csv'))
+    
+    # Extract session identifiers (everything before _Video1 or _Video2)
+    sessions = {}
+    for f in traj_files:
+        # Pattern: SPECIES_CamXVideoY_TIMESTAMP_SETUP_trajectories.csv
+        # Extract everything up to and including the timestamp+setup
+        match = re.match(r'(.*?)_(CamA|CamB)Video([12])_(.*?)_(Setup\d+)_trajectories', f.name)
+        if match:
+            species = match.group(1)
+            cam = match.group(2)
+            video = match.group(3)
+            timestamp = match.group(4)
+            setup = match.group(5)
+            
+            # Session key = species + timestamp + setup (ignores camera)
+            session_key = f"{species}_{timestamp}_{setup}"
+            
+            if session_key not in sessions:
+                sessions[session_key] = {'Video1': None, 'Video2': None, 'areas': None}
+            
+            # Store the file path
+            sessions[session_key][f'Video{video}'] = f
+    
+    # Find corresponding areas files for each session
+    areas_files = sorted(TRAJECTORIES_DIR.glob('*_areas.csv'))
+    for session_key in sessions:
+        species_match = re.search(r'DGRP\d+', session_key)
+        if species_match:
+            species = species_match.group()
+            for areas_file in areas_files:
+                if species in areas_file.name and session_key.split(species)[1] in areas_file.name:
+                    sessions[session_key]['areas'] = areas_file
+                    break
+    
+    # Validate all sessions have required files
+    valid_sessions = {}
+    for session_key, files in sessions.items():
+        if files['Video1'] and files['Video2'] and files['areas']:
+            valid_sessions[session_key] = files
+    
+    return valid_sessions
+
+SESSIONS = discover_sessions()
+print(f"Found {len(SESSIONS)} sessions:")
+for i, session_key in enumerate(sorted(SESSIONS.keys()), 1):
+    print(f"  {i}. {session_key}")
+
+OUTPUT_BASE_DIR = Path('output/plots_arena')
+OUTPUT_BASE_DIR.mkdir(exist_ok=True)
 
 PLOT_TIME_MAX = 120 * 60  # 120 minutes in seconds
 # fixed vmax for sector color mapping (seconds) for individual plots
@@ -39,6 +92,13 @@ SECTOR_COLOR_VMAX_COMBINED = None
 # radial color vmax overrides (None -> compute from data)
 RADIAL_COLOR_VMAX_INDIV = None
 RADIAL_COLOR_VMAX_COMBINED = None
+
+
+def get_session_output_dir(session_key):
+    """Get the output directory for a specific session."""
+    session_dir = OUTPUT_BASE_DIR / session_key
+    session_dir.mkdir(exist_ok=True)
+    return session_dir
 
 
 def load_and_concat(traj1, traj2):
@@ -106,7 +166,7 @@ def hide_spines(ax):
     ax.set_yticks([])
 
 
-def plot_individual_arenas(traj, fly_ids, center, radius):
+def plot_individual_arenas(traj, fly_ids, center, radius, output_dir):
     # one subplot per fly + combined
     n = len(fly_ids)
     ncols = 3
@@ -120,12 +180,17 @@ def plot_individual_arenas(traj, fly_ids, center, radius):
     PIXELS_PER_CM = 208.0
     PURSUIT_DISTANCE_CM = 1.0
     PURSUIT_MIN_DURATION = 5.0
+    # copulation thresholds (distance in cm, min duration in seconds)
+    COPULATION_DISTANCE_CM = 0.3
+    COPULATION_MIN_DURATION = 30.0
     # estimate frame rate
     total_time = times[-1] - times[0] if len(times) > 1 else 1.0
     frame_rate = len(times) / total_time if total_time > 0 else 1.0
     min_frames = int(PURSUIT_MIN_DURATION * frame_rate)
+    min_frames_cop = int(COPULATION_MIN_DURATION * frame_rate)
 
-    male_id_detected = identify_male_ids(AREAS_PATH)
+    areas_path = SESSIONS[current_session]['areas']
+    male_id_detected = identify_male_ids(areas_path)
     pursuit_states = {}
     # compute male coords
     mx = traj[f'x{male_id_detected}'].values
@@ -155,6 +220,39 @@ def plot_individual_arenas(traj, fly_ids, center, radius):
             if dur >= min_frames:
                 pursuit[start_idx:] = True
         pursuit_states[fid] = pursuit
+
+    # detect copulation events (distance smaller than COPULATION_DISTANCE_CM for sufficient duration)
+    copulation_states = {}
+    for fid in fly_ids:
+        if fid == male_id_detected:
+            continue
+        fx = traj[f'x{fid}'].values
+        fy = traj[f'y{fid}'].values
+        dist_px = np.sqrt((mx - fx)**2 + (my - fy)**2)
+        dist_cm = dist_px / PIXELS_PER_CM
+        within_cop = (dist_cm < COPULATION_DISTANCE_CM).astype(int)
+        cop = np.zeros(len(within_cop), dtype=bool)
+        in_c = False
+        start_idx = 0
+        for i in range(len(within_cop)):
+            if within_cop[i] == 1 and not in_c:
+                in_c = True
+                start_idx = i
+            elif within_cop[i] == 0 and in_c:
+                dur = i - start_idx
+                if dur >= min_frames_cop:
+                    cop[start_idx:i] = True
+                in_c = False
+        if in_c:
+            dur = len(within_cop) - start_idx
+            if dur >= min_frames_cop:
+                cop[start_idx:] = True
+        copulation_states[fid] = cop
+
+    # male copulation when any female is copulating
+    male_copulation = np.zeros(len(times), dtype=bool)
+    for arr in copulation_states.values():
+        male_copulation = male_copulation | arr
 
     # male pursuit if any female is being pursued
     male_pursuit = np.zeros(len(times), dtype=bool)
@@ -189,8 +287,16 @@ def plot_individual_arenas(traj, fly_ids, center, radius):
                 seg_y = y[run]
                 pts = np.vstack([seg_x, seg_y]).T
                 segs = np.stack([pts[:-1], pts[1:]], axis=1)
-                lc2 = LineCollection(segs, colors='red', linewidths=2.0)
+                # use RGB(242,169,59) for pursuit highlighting (hex #F2A93B)
+                lc2 = LineCollection(segs, colors='#F2A93B', linewidths=2.0)
                 ax.add_collection(lc2)
+        # overlay copulation locations as red dots (or lines)
+        if fid == male_id_detected:
+            cop_mask = male_copulation & mask_time
+        else:
+            cop_mask = copulation_states.get(fid, np.zeros(len(times), dtype=bool)) & mask_time
+        if cop_mask.sum() > 0:
+            ax.scatter(x[cop_mask], y[cop_mask], s=18, c='red', edgecolors='k', linewidth=0.3, zorder=6)
         ax.set_aspect('equal')
         ax.set_xlim(center[0]-radius*1.1, center[0]+radius*1.1)
         ax.set_ylim(center[1]-radius*1.1, center[1]+radius*1.1)
@@ -203,7 +309,7 @@ def plot_individual_arenas(traj, fly_ids, center, radius):
     for j in range(n, nrows*ncols):
         axes[j].axis('off')
 
-    out = OUTPUT_DIR / 'individual_arenas.png'
+    out = output_dir / 'individual_arenas.png'
     plt.tight_layout()
     fig.savefig(out, dpi=200)
     print(f'Saved {out}')
@@ -224,14 +330,14 @@ def plot_individual_arenas(traj, fly_ids, center, radius):
     ax.set_xticks([])
     ax.set_yticks([])
     hide_spines(ax)
-    out = OUTPUT_DIR / 'combined_trajectories.png'
+    out = output_dir / 'combined_trajectories.png'
     plt.tight_layout()
     
     fig.savefig(out, dpi=200)
     print(f'Saved {out}')
 
 
-def sector_heatmaps(traj, fly_ids, center, radius):
+def sector_heatmaps(traj, fly_ids, center, radius, output_dir):
     # compute angles and distance per frame and time weights
     times = traj['time'].values
     dt = time_weights(times)
@@ -330,7 +436,7 @@ def sector_heatmaps(traj, fly_ids, center, radius):
     cax = fig.add_axes([0.94, 0.15, 0.02, 0.7])
     fig.colorbar(sm, cax=cax, orientation='vertical', label='Time (s)')
 
-    out = OUTPUT_DIR / 'sector_time_individual.png'
+    out = output_dir / 'sector_time_individual.png'
     plt.tight_layout()
     fig.savefig(out, dpi=200)
     print(f'Saved {out}')
@@ -361,13 +467,13 @@ def sector_heatmaps(traj, fly_ids, center, radius):
     ax.set_ylim(center[1]-radius*1.05, center[1]+radius*1.05)
     ax.set_title('Combined sector time (s)')
     hide_spines(ax)
-    out = OUTPUT_DIR / 'sector_time_combined.png'
+    out = output_dir / 'sector_time_combined.png'
     plt.tight_layout()
     fig.savefig(out, dpi=200)
     print(f'Saved {out}')
 
 
-def radial_heatmaps(traj, fly_ids, center, radius, n_rings=5):
+def radial_heatmaps(traj, fly_ids, center, radius, output_dir, n_rings=5):
     times = traj['time'].values
     dt = time_weights(times)
     mask_time = times <= PLOT_TIME_MAX
@@ -453,7 +559,7 @@ def radial_heatmaps(traj, fly_ids, center, radius, n_rings=5):
     fig.subplots_adjust(right=0.75)
     cax = fig.add_axes([0.94, 0.15, 0.02, 0.7])
     fig.colorbar(sm, cax=cax, orientation='vertical', label='Time (s)')
-    out = OUTPUT_DIR / 'radial_time_individual.png'
+    out = output_dir / 'radial_time_individual.png'
     plt.tight_layout()
     fig.savefig(out, dpi=200)
     print(f'Saved {out}')
@@ -499,29 +605,56 @@ def radial_heatmaps(traj, fly_ids, center, radius, n_rings=5):
     ax.set_ylim(center[1]-radius*1.05, center[1]+radius*1.05)
     ax.set_title('Combined radial time (s)')
     hide_spines(ax)
-    out = OUTPUT_DIR / 'radial_time_combined.png'
+    out = output_dir / 'radial_time_combined.png'
     plt.tight_layout()
     fig.savefig(out, dpi=200)
     print(f'Saved {out}')
 
 
 def main():
-    traj = load_and_concat(TRAJECTORIES_PATH_1, TRAJECTORIES_PATH_2)
-    areas = pd.read_csv(AREAS_PATH)
-    # identify male (smallest mean)
-    male_index = areas['mean'].idxmin()
-    male_id = male_index + 1
-    all_ids = list(range(1, 7))
-    female_ids = [fid for fid in all_ids if fid != male_id]
-    fly_ids = all_ids
+    global current_session
+    
+    for session_key in sorted(SESSIONS.keys()):
+        current_session = session_key
+        print(f"\n{'='*60}")
+        print(f"Processing session: {session_key}")
+        print(f"{'='*60}")
+        
+        # Get file paths for this session
+        traj1_path = SESSIONS[session_key]['Video1']
+        traj2_path = SESSIONS[session_key]['Video2']
+        areas_path = SESSIONS[session_key]['areas']
+        
+        # Load and concatenate trajectories
+        traj = load_and_concat(traj1_path, traj2_path)
+        areas = pd.read_csv(areas_path)
+        
+        # identify male (smallest mean)
+        male_index = areas['mean'].idxmin()
+        male_id = male_index + 1
+        all_ids = list(range(1, 7))
+        female_ids = [fid for fid in all_ids if fid != male_id]
+        fly_ids = all_ids
 
-    center_x, center_y, radius = estimate_arena_geometry(traj, fly_ids)
-    center = (center_x, center_y)
-    print(f'Estimated arena center: ({center_x:.1f}, {center_y:.1f}), radius: {radius:.1f}')
+        center_x, center_y, radius = estimate_arena_geometry(traj, fly_ids)
+        center = (center_x, center_y)
+        print(f'Estimated arena center: ({center_x:.1f}, {center_y:.1f}), radius: {radius:.1f}')
 
-    plot_individual_arenas(traj, fly_ids, center, radius)
-    sector_heatmaps(traj, fly_ids, center, radius)
-    radial_heatmaps(traj, fly_ids, center, radius, n_rings=8)
+        # Get output directory for this session
+        output_dir = get_session_output_dir(session_key)
+        
+        # Generate plots
+        plot_individual_arenas(traj, fly_ids, center, radius, output_dir)
+        sector_heatmaps(traj, fly_ids, center, radius, output_dir)
+        radial_heatmaps(traj, fly_ids, center, radius, output_dir, n_rings=8)
+        
+        # Close all figures to free memory
+        plt.close('all')
+        
+    print(f"\n{'='*60}")
+    print("All sessions processed successfully!")
+    print(f"Output saved to: {OUTPUT_BASE_DIR}")
+    print(f"{'='*60}\n")
 
 
 if __name__ == '__main__':
