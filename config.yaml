@@ -18,10 +18,10 @@ pixels_per_cm:
 behavior_thresholds:
   copulation:
     distance_cm: 0.3  # Distance threshold for copulation (cm)
-    min_duration_sec: 120  # Minimum duration for copulation (seconds)
+    min_duration_sec: 120  # Minimum duration for copulation (seconds) - 120
     use_id_disappearance: true  # Also detect copulation when male OR female disappears
-    disappearance_min_duration_sec: 120  # Min duration when fly is missing (seconds)
-    gap_merge_threshold_sec: 60  # Merge copulation events if gap < 60 seconds (1 min)
+    disappearance_min_duration_sec: 60  # Min duration when fly is missing (seconds) - 120
+    gap_merge_threshold_sec: 300  # Merge copulation events if gap < 60 seconds (1 min)
 
   pursuit:
     distance_cm: 1.0  # Distance threshold for pursuit (cm)

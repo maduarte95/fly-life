@@ -95,7 +95,7 @@ def get_pixels_per_cm(dataset_name, camera, setup=None):
 def merge_copulation_gaps(copulation_array, frame_rate, gap_threshold_seconds):
     """
     Merge copulation events if gap between them is less than threshold.
-    Uses vectorized operations for speed.
+    Uses efficient event-based merging.
 
     Parameters:
     -----------
@@ -116,11 +116,30 @@ def merge_copulation_gaps(copulation_array, frame_rate, gap_threshold_seconds):
 
     gap_threshold_frames = int(gap_threshold_seconds * frame_rate)
 
-    # Use morphological closing to merge small gaps
-    # This is much faster than loop-based approach
-    from scipy.ndimage import binary_closing
-    structure = np.ones(gap_threshold_frames * 2 + 1)
-    merged = binary_closing(copulation_array, structure=structure)
+    # Find copulation events using connected components
+    labeled_array, num_events = ndimage.label(copulation_array)
+
+    if num_events <= 1:
+        return copulation_array
+
+    merged = copulation_array.copy()
+
+    # Find end of each event and start of next event
+    for event_num in range(1, num_events):
+        # Find end of current event
+        current_event_mask = labeled_array == event_num
+        current_end = np.where(current_event_mask)[0][-1]
+
+        # Find start of next event
+        next_event_mask = labeled_array == (event_num + 1)
+        next_start = np.where(next_event_mask)[0][0]
+
+        # Calculate gap
+        gap = next_start - current_end - 1
+
+        # If gap is small enough, fill it
+        if gap <= gap_threshold_frames:
+            merged[current_end + 1:next_start] = True
 
     return merged
 
@@ -441,7 +460,7 @@ def process_run(trajectories_path, metadata_row, dataset_name):
             event_duration = (end - start) / frame_rate
             event_time = trajectories['time'].iloc[start]
 
-            lookback_frames = int(5 * frame_rate)
+            lookback_frames = int(5 * frame_rate)  # Look back 5 seconds
             lookback_start = max(0, start - lookback_frames)
 
             avg_distances = {}
@@ -454,7 +473,11 @@ def process_run(trajectories_path, metadata_row, dataset_name):
                     avg_distances[female_id] = np.inf
 
             closest_female = min(avg_distances, key=avg_distances.get)
-            copulation_df.loc[start:end-1, closest_female] = True
+            if avg_distances[closest_female] != np.inf:
+                copulation_df.loc[start:end-1, closest_female] = True
+                print(f"    Event {event_idx + 1}: {event_time:.1f}s ({event_time/60:.1f}min) assigned to Female {closest_female} ({avg_distances[closest_female]:.2f}cm before)")
+            else:
+                print(f"    Event {event_idx + 1}: {event_time:.1f}s ({event_time/60:.1f}min) - no valid distance data (skipped)")
 
         # ============================================================================
         # DETECT COPULATION BY FEMALE DISAPPEARANCE
@@ -494,17 +517,17 @@ def process_run(trajectories_path, metadata_row, dataset_name):
                     event_duration = (end - start) / frame_rate
                     event_time = trajectories['time'].iloc[start]
 
-                    # Check if male is present during this time (not missing)
-                    # If male is also missing, we already handled it in male disappearance
+                    # Check if male is also missing (for logging purposes)
                     male_present_during = ~male_missing[start:end]
+                    male_also_missing = not male_present_during.any()
 
-                    if male_present_during.any():
-                        # Male is present for at least part of this female disappearance
-                        # This suggests copulation
-                        print(f"    Event {event_idx + 1}: {event_time:.1f}s ({event_time/60:.1f}min), duration: {event_duration:.1f}s (male present)")
-                        copulation_df.loc[start:end-1, female_id] = True
+                    # Mark as copulation
+                    copulation_df.loc[start:end-1, female_id] = True
+
+                    if male_also_missing:
+                        print(f"    Event {event_idx + 1}: {event_time:.1f}s ({event_time/60:.1f}min), duration: {event_duration:.1f}s (male also missing)")
                     else:
-                        print(f"    Event {event_idx + 1}: {event_time:.1f}s ({event_time/60:.1f}min), duration: {event_duration:.1f}s (male also missing - skipped)")
+                        print(f"    Event {event_idx + 1}: {event_time:.1f}s ({event_time/60:.1f}min), duration: {event_duration:.1f}s (male present)")
 
     # ============================================================================
     # MERGE COPULATION GAPS
